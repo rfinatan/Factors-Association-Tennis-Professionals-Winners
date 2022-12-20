@@ -1,0 +1,867 @@
+---
+title: An Analysis of Probabilistic Factors in Association of Tennis Professionals
+  Winners
+author: "Rares Finatan"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+#Import dependencies
+library(tidyverse)
+library(caret)
+library(kernlab)
+library(lubridate)
+library(DataExplorer)
+library(skimr)
+library(lares)
+```
+
+### SECTION 1 - ELEMENTARY DATA ANALYSIS
+
+#### 1.1 - Data Import
+
+```{r}
+#Extract relevant file names from local forked repo
+df <- data.frame(list.files(path = "~/Documents/Masters/Syracuse/IST 687/FINAL_PROJECT/tennis_atp-master", pattern = "*.csv"))
+
+df <- df %>% rename(file_name = list.files.path......Documents.Masters.Syracuse.IST.687.FINAL_PROJECT.tennis_atp.master...)
+
+df <- df %>% filter(grepl('atp_matches_20', file_name))
+
+file_list <- paste('./tennis_atp-master/', df$file_name, sep = '')
+file_list
+```
+
+```{r}
+#Merge the contents of the files into singular data frame
+merged_df <- file_list %>% map_df(~read_csv(., show_col_types = FALSE, col_types = list(winner_seed = 'd', loser_seed = 'd')))
+```
+
+#### 1.2 - Exploratory Data Analysis
+
+```{r}
+# Basic analysis of data set
+plot_intro(merged_df)
+```
+
+#### 1.3 - Distribution of Data
+
+##### Distribution by Year
+
+```{r}
+#Apply consistent date formatting 
+merged_df$tourney_date <- ymd(merged_df$tourney_date)
+
+#Create year, month, and date columns
+merged_df$tourney_year <- as.numeric(strftime(merged_df$tourney_date, '%Y'))
+merged_df$tourney_month <- as.numeric(strftime(merged_df$tourney_date, '%m'))
+merged_df$tourney_day <- as.numeric(strftime(merged_df$tourney_date, '%d'))
+
+#Create variable inclusive of summary statistics
+mean <- round(mean(merged_df$tourney_year),2)
+median <- median(merged_df$tourney_year)
+mode <- table(merged_df$tourney_year)
+mode <- as.numeric(names(mode[which(mode == max(mode))]))
+central_tendency_metrics <- paste(sprintf('Mean: %s', mean), sprintf('Median: %s', median), sprintf('Mode: %s', mode), sep = '  |  ')
+
+#Plot distribution of match data, by year
+ggplot(merged_df, aes(x = tourney_year)) + 
+  geom_histogram(color = 'black', fill = 'greenyellow', bins = 23) +
+  scale_x_continuous(breaks=seq(2000,2022,1)) + 
+  theme(axis.text.x = element_text(angle = 45), plot.title = element_text(hjust = 0.5)) + 
+  ggtitle('Distribution of Matches by Calendar Year') + 
+  xlab('Number of Matches') + 
+  ylab('Calendar Year') +
+  labs(caption = central_tendency_metrics)
+```
+##### Distribution by Surface
+
+```{r}
+#Create variable inclusive of summary statistics
+mean <- round(mean(merged_df$surface),2)
+median <- median(merged_df$surface)
+mode <- table(merged_df$surface)
+mode <- as.numeric(names(mode[which(mode == max(mode))]))
+central_tendency_metrics <- paste(sprintf('Mean: %s', mean), sprintf('Median: %s', median), sprintf('Mode: %s', mode), sep = '  |  ')
+
+#Plot distribution of match data, by surface
+ggplot(merged_df, aes(y = surface, fill = surface)) + 
+  geom_bar(color = 'black') + 
+  theme(axis.text.x = element_text(angle = 0), plot.title = element_text(hjust = 0.5)) + 
+  ggtitle('Distribution of Matches by Surface') + 
+  xlab('Number of Matches') + 
+  ylab('Type of Surface') +
+  labs(caption = central_tendency_metrics)
+```
+##### Distribution of all Variables
+
+```{r}
+#Create a histogram of all attributes' distributions using the DataExplorer package
+plot_histogram(merged_df)
+```
+### SECTION 2 - ELEMENTARY DATA CLEANING AND DIMENSIONALITY REDUCTION
+
+#### 2.1 - Remove Attributes with High NA Percentages
+
+```{r}
+# Identify high NA %age attributes
+skim_df <- data.frame(skim(merged_df))
+high_NA_perc <- skim_df %>% filter(complete_rate < 0.9)
+high_NA_perc_list <- high_NA_perc$skim_variable
+high_NA_df <- merged_df %>% select(high_NA_perc_list)
+
+# Visualize high NA %age attributes
+plot_missing(high_NA_df) + 
+  ggtitle('Concerning Attributes due to High % of NAs') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+##### Drop High NA % Attributes
+
+```{r}
+#Drop high NA %age attributes
+merged_df <- subset(merged_df, select = -c(winner_seed,loser_seed,loser_entry,winner_entry))
+```
+
+
+#### 2.2 - Analyze Highly Correlated Variables
+
+```{r}
+# Analyze correlations for all variables
+correlation_df <- (cor(merged_df[, unlist(lapply(merged_df, is.numeric))], use = 'complete.obs'))
+```
+
+```{r}
+# Filter for only highly correlated variables
+highly_correlated <- findCorrelation(correlation_df, cutoff = 0.9, verbose = TRUE)
+
+# Correlation plot for all top 10 highly correlated variables
+highly_correlated_df <- subset(merged_df, select = highly_correlated)
+corr_cross(highly_correlated_df, max_pvalue = 0.05, top = 10)
+```
+
+#### 2.3 - Addressing NAs and Zeros
+
+```{r}
+#Remove winners with less than 100 matches and no rank
+winners <- table(merged_df$winner_name)
+winners_less_100 <- merged_df[merged_df$winner_name %in% names(winners[winners < 100]), ]
+winners_less_100_no_rank <- winners_less_100 %>% subset(is.na(winners_less_100$winner_rank))
+merged_df <- anti_join(merged_df, winners_less_100_no_rank, by = "winner_id")
+
+#Remove losers with less than 100 matches and no rank
+losers <- table(merged_df$loser_name)
+losers_less_100 <- merged_df[merged_df$loser_name %in% names(losers[losers < 100]), ]
+losers_less_100_no_rank <- losers_less_100 %>% subset(is.na(losers_less_100$loser_rank))
+merged_df <- anti_join(merged_df, losers_less_100_no_rank, by = "loser_id")
+
+#Additionally, there are some rows where no minute data is available for the meaning, meaning it wasn't played or cancelled during the proceedings. Remove these rows.
+
+merged_df <- merged_df[complete.cases(merged_df[, "minutes"]),]
+```
+
+#### 2.4 - COVID-19 ATP Interruptions
+
+```{r}
+#Due to COVID-19, match data is noisy and incomplete, whereby all matches in 2020 will be removed from the dataset.
+
+str(merged_df$tourney_date)
+matches_in_2020 <- filter(merged_df, merged_df$tourney_date >= '2020-01-01' & merged_df$tourney_date <= '2020-12-31')
+merged_df <- anti_join(merged_df, matches_in_2020, by = "tourney_date")
+```
+
+#### 2.5 - Obscuring Target Variables
+
+```{r}
+#Create target variable
+merged_df$result <- merged_df$winner_name
+
+#Create function for sorting players in player_1
+first_player_sort = function(x,y) {paste(sort(c(x, y))[1])}
+first_player_sort = Vectorize(first_player_sort)
+
+#Assign player_1 values to the player occurring first in the alphabetical comparison
+merged_df <- merged_df %>% mutate(player_1 = first_player_sort(winner_name, loser_name))
+
+#Create function for sorting players in player_1
+second_player_sort = function(x,y) {paste(sort(c(x, y))[2])}
+second_player_sort = Vectorize(second_player_sort)
+
+#Assign player_2 values to the player occurring second in the alphabetical comparison
+merged_df <- merged_df %>% mutate(player_2 = second_player_sort(winner_name, loser_name))
+
+#Rename winner columns to player_1 columns, rename loser columns to player_2 columns
+colnames(merged_df) <- gsub("winner", "player_1", colnames(merged_df))
+colnames(merged_df) <- gsub("loser", "player_2", colnames(merged_df))
+```
+
+#### 2.6 - Administrative Attribute Removal
+
+```{r}
+#Additionally remove scores including alpha characters, which are indicative of a player retirement, default, or walkover as 
+
+alpha_rows <- grep("[A-Za-z]", merged_df$score)
+merged_df <- subset(merged_df, !(row.names(merged_df) %in% alpha_rows))
+```
+
+```{r}
+#The merged data frame also contains many hyper-granular statistics about the match pertaining to each player. For macro-level analysis of who is likely to win, these statistics won't serve as useful primary dimensions and are to be removed to avoid hyperdimensionality of the model.
+
+#Remove granular attributes for winners
+granular_w_stat_columns <- grep("w_", names(merged_df))
+merged_df <- subset(merged_df, select = -granular_w_stat_columns)
+
+#Remove granular attributes for losers
+granular_l_stat_columns <- grep("l_", names(merged_df))
+merged_df <- subset(merged_df, select = -granular_l_stat_columns)
+```
+
+```{r}
+#There are also some administrative attributes that have no added predictive value and are simply for record purposes. These are to be removed.
+
+merged_df <- select(merged_df, -c("player_1_ioc", "player_2_ioc", "player_1_id", "player_2_id"))
+```
+
+#### 2.7 - Non-Imputable NA Removal
+
+```{r}
+#A small number of rows of player's heights and hand preference is missing. They are for players ranked very low and have low number of matches played. Player's height could be imputed using the mean height value of the group, but height is important in tennis and to not bias the data, the rows are removed. Similarly, hand preference can be imputed using the mode, but it would not be an accurate method of imputation. Given that these are the only NA values remaining, one can use a sweeping na.omit() function to eliminate the observations.
+merged_df <- na.omit(merged_df)
+```
+
+### SECTION 3 - FEATURE ENGINEERING
+
+#### 3.1 - Head to Head Feature
+
+```{r}
+#To create a record of who has an advantage going into a match, create a head-to-head feature quantifying the victories of a player against another if a previous matchup(s) exists
+
+#Register total encounters
+total_encounters <- data.frame(table(merged_df$player_1, merged_df$player_2))
+merged_df <- merge(merged_df, total_encounters, by.x = c("player_1", "player_2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+merged_df <- rename(merged_df, total_encounters = Freq)
+```
+
+```{r}
+#Register player_1 victories
+player_1_h2h_w <- data.frame(
+                    table(
+                      merged_df$player_1[merged_df$result == merged_df$player_1], merged_df$player_2[merged_df$result == merged_df$player_1]
+                      )
+                    )
+player_1_h2h_w <- rename(player_1_h2h_w, player_1_h2h = Freq)
+merged_df <- merge(merged_df, player_1_h2h_w, by.x = c("player_1", "player_2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+
+# Replace NAs in the player_1_h2h column with the value 0
+library(imputeTS)
+merged_df$player_1_h2h <- na_replace(merged_df$player_1_h2h, 0)
+
+#Register player_2 victories
+player_2_h2h_w <- data.frame(
+                    table(
+                      merged_df$player_1[merged_df$result == merged_df$player_2], merged_df$player_2[merged_df$result == merged_df$player_2]
+                      )
+                    )
+player_2_h2h_w <- rename(player_2_h2h_w, player_2_h2h = Freq)
+merged_df <- merge(merged_df, player_2_h2h_w, by.x = c("player_1", "player_2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+# Replace NAs in the player_2_h2h column with the value 0
+merged_df$player_2_h2h <- na_replace(merged_df$player_2_h2h, 0)
+```
+
+#### 3.2 - % Win on Surface
+
+```{r}
+#For player_1:
+
+#Calculate number of matches per player per surface
+player_1_surface <- data.frame(
+                    table(
+                      merged_df$player_1, merged_df$surface
+                      )
+                    )
+
+#Calculate number of wins per player per surface
+player_1_surface_wins <- data.frame(
+                    table(
+                      merged_df$player_1[merged_df$result == merged_df$player_1], merged_df$surface[merged_df$result == merged_df$player_1]
+                      )
+                    )
+
+#Calculate win % per player per surface
+player_1_surface_w_perc <- merge(player_1_surface, player_1_surface_wins, by.x = c("Var1", "Var2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+player_1_surface_w_perc$Freq.y <- na_replace(player_1_surface_w_perc$Freq.y, 0)
+player_1_surface_w_perc$w_perc <- round((player_1_surface_w_perc$Freq.y/player_1_surface_w_perc$Freq.x), 2)
+player_1_surface_w_perc$w_perc <- na_replace(player_1_surface_w_perc$w_perc, 0)
+
+#Drop columns used for calculation
+player_1_surface_w_perc <- player_1_surface_w_perc %>% select(-Freq.x, -Freq.y)
+
+#Rename player 1 win % data frame columns
+player_1_surface_w_perc <- player_1_surface_w_perc %>% rename(player_1_surface_perc = w_perc)
+
+#For player_2:
+
+#Calculate number of matches per player per surface
+player_2_surface <- data.frame(
+                    table(
+                      merged_df$player_2, merged_df$surface
+                      )
+                    )
+
+#Calculate number of wins per player per surface
+player_2_surface_wins <- data.frame(
+                    table(
+                      merged_df$player_2[merged_df$result == merged_df$player_2], merged_df$surface[merged_df$result == merged_df$player_2]
+                      )
+                    )
+
+#Calculate win % per player per surface
+player_2_surface_w_perc <- merge(player_2_surface, player_2_surface_wins, by.x = c("Var1", "Var2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+player_2_surface_w_perc$Freq.y <- na_replace(player_2_surface_w_perc$Freq.y, 0)
+player_2_surface_w_perc$w_perc <- round((player_2_surface_w_perc$Freq.y/player_2_surface_w_perc$Freq.x), 2)
+player_2_surface_w_perc$w_perc <- na_replace(player_2_surface_w_perc$w_perc, 0)
+
+#Drop columns used for calculation
+player_2_surface_w_perc <- player_2_surface_w_perc %>% select(-Freq.x, -Freq.y)
+
+#Rename player 2 win % data frame columns
+player_2_surface_w_perc <- player_2_surface_w_perc %>% rename(player_2_surface_perc = w_perc)
+
+#Consolidate player_1 and player_2 data into merged_df
+merged_df <- merge(merged_df, player_1_surface_w_perc, by.x = c("player_1", "surface"), by.y = c("Var1", "Var2"), all.x = TRUE)
+merged_df <- merge(merged_df, player_2_surface_w_perc, by.x = c("player_2", "surface"), by.y = c("Var1", "Var2"), all.x = TRUE)
+```
+
+#### 3.3 - % Win at General Tournament Stage
+
+```{r}
+#For player_1:
+
+#Calculate number of matches per player per tournament stage
+player_1_round <- data.frame(
+                    table(
+                      merged_df$player_1, merged_df$round
+                      )
+                    )
+
+#Calculate number of wins per player per tournament stage
+player_1_round_wins <- data.frame(
+                    table(
+                      merged_df$player_1[merged_df$result == merged_df$player_1], merged_df$round[merged_df$result == merged_df$player_1]
+                      )
+                    )
+#Calculate win % per player per tournament stage
+player_1_round_w_perc <- merge(player_1_round, player_1_round_wins, by.x = c("Var1", "Var2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+player_1_round_w_perc$Freq.y <- na_replace(player_1_round_w_perc$Freq.y, 0)
+player_1_round_w_perc$w_perc <- round((player_1_round_w_perc$Freq.y/player_1_round_w_perc$Freq.x), 2)
+player_1_round_w_perc$w_perc <- na_replace(player_1_round_w_perc$w_perc, 0)
+
+#Drop columns used for calculation
+player_1_round_w_perc <- player_1_round_w_perc %>% select(-Freq.x, -Freq.y)
+
+#Rename player 1 win % data frame columns
+player_1_round_w_perc <- player_1_round_w_perc %>% rename(player_1_round_perc = w_perc)
+
+#For player_2:
+
+#Calculate number of matches per player per tournament stage
+player_2_round <- data.frame(
+                    table(
+                      merged_df$player_2, merged_df$round
+                      )
+                    )
+
+#Calculate number of wins per player per tournament stage
+player_2_round_wins <- data.frame(
+                    table(
+                      merged_df$player_2[merged_df$result == merged_df$player_2], merged_df$round[merged_df$result == merged_df$player_2]
+                      )
+                    )
+#Calculate win % per player per tournament stage
+player_2_round_w_perc <- merge(player_2_round, player_2_round_wins, by.x = c("Var1", "Var2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+player_2_round_w_perc$Freq.y <- na_replace(player_2_round_w_perc$Freq.y, 0)
+player_2_round_w_perc$w_perc <- round((player_2_round_w_perc$Freq.y/player_2_round_w_perc$Freq.x), 2)
+player_2_round_w_perc$w_perc <- na_replace(player_2_round_w_perc$w_perc, 0)
+
+#Drop columns used for calculation
+player_2_round_w_perc <- player_2_round_w_perc %>% select(-Freq.x, -Freq.y)
+
+#Rename player 2 win % data frame columns
+player_2_round_w_perc <- player_2_round_w_perc %>% rename(player_2_round_perc = w_perc)
+
+#Consolidate player_1 and player_2 data into merged_df
+merged_df <- merge(merged_df, player_1_round_w_perc, by.x = c("player_1", "round"), by.y = c("Var1", "Var2"), all.x = TRUE)
+merged_df <- merge(merged_df, player_2_round_w_perc, by.x = c("player_2", "round"), by.y = c("Var1", "Var2"), all.x = TRUE)
+```
+
+#### 3.4 - % Win at Tournament Level
+
+```{r}
+#For player_1:
+
+#Calculate number of matches per player per tournament level
+player_1_tourney_level <- data.frame(
+                    table(
+                      merged_df$player_1, merged_df$tourney_level
+                      )
+                    )
+
+#Calculate number of wins per player per tournament level
+player_1_tourney_level_wins <- data.frame(
+                    table(
+                      merged_df$player_1[merged_df$result == merged_df$player_1], merged_df$tourney_level[merged_df$result == merged_df$player_1]
+                      )
+                    )
+#Calculate win % per player per tournament level
+player_1_tourney_level_w_perc <- merge(player_1_tourney_level, player_1_tourney_level_wins, by.x = c("Var1", "Var2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+player_1_tourney_level_w_perc$Freq.y <- na_replace(player_1_tourney_level_w_perc$Freq.y, 0)
+player_1_tourney_level_w_perc$w_perc <- round((player_1_tourney_level_w_perc$Freq.y/player_1_tourney_level_w_perc$Freq.x), 2)
+player_1_tourney_level_w_perc$w_perc <- na_replace(player_1_tourney_level_w_perc$w_perc, 0)
+
+#Drop columns used for calculation
+player_1_tourney_level_w_perc <- player_1_tourney_level_w_perc %>% select(-Freq.x, -Freq.y)
+
+#Rename player 1 win % data frame columns
+player_1_tourney_level_w_perc <- player_1_tourney_level_w_perc %>% rename(player_1_tourney_level_perc = w_perc)
+
+#For player_2:
+
+#Calculate number of matches per player per tournament level
+player_2_tourney_level <- data.frame(
+                    table(
+                      merged_df$player_2, merged_df$tourney_level
+                      )
+                    )
+
+#Calculate number of wins per player per tournament level
+player_2_tourney_level_wins <- data.frame(
+                    table(
+                      merged_df$player_2[merged_df$result == merged_df$player_2], merged_df$tourney_level[merged_df$result == merged_df$player_2]
+                      )
+                    )
+#Calculate win % per player per tournament level
+player_2_tourney_level_w_perc <- merge(player_2_tourney_level, player_2_tourney_level_wins, by.x = c("Var1", "Var2"), by.y = c("Var1", "Var2"), all.x = TRUE)
+player_2_tourney_level_w_perc$Freq.y <- na_replace(player_2_tourney_level_w_perc$Freq.y, 0)
+player_2_tourney_level_w_perc$w_perc <- round((player_2_tourney_level_w_perc$Freq.y/player_2_tourney_level_w_perc$Freq.x), 2)
+player_2_tourney_level_w_perc$w_perc <- na_replace(player_2_tourney_level_w_perc$w_perc, 0)
+
+#Drop columns used for calculation
+player_2_tourney_level_w_perc <- player_2_tourney_level_w_perc %>% select(-Freq.x, -Freq.y)
+
+#Rename player 2 win % data frame columns
+player_2_tourney_level_w_perc <- player_2_tourney_level_w_perc %>% rename(player_2_tourney_level_perc = w_perc)
+
+#Consolidate player_1 and player_2 data into merged_df
+merged_df <- merge(merged_df, player_1_tourney_level_w_perc, by.x = c("player_1", "tourney_level"), by.y = c("Var1", "Var2"), all.x = TRUE)
+merged_df <- merge(merged_df, player_2_tourney_level_w_perc, by.x = c("player_2", "tourney_level"), by.y = c("Var1", "Var2"), all.x = TRUE)
+```
+
+#### 3.5 - % Win at Specific Tournament Stage
+
+```{r}
+#Calculate win %age of player 1 at x tournament in the nth round
+merged_df$player_1_tourney_round_perc <- round((merged_df$player_1_tourney_level_perc * merged_df$player_1_round_perc), 2)
+
+#Calculate win %age of player 2 at x tournament in the nth round
+merged_df$player_2_tourney_round_perc <- round((merged_df$player_2_tourney_level_perc * merged_df$player_2_round_perc), 2)
+
+```
+
+#### 3.6 - Removal of Redundant Features used in Feature Engineering Calculations
+
+```{r}
+redundant_features <- c('tourney_month', 'tourney_year', 'tourney_day', 'tourney_id', 'match_num')
+merged_df <- merged_df %>% select(-redundant_features)
+
+features_to_keep <- c('player_1_age',
+                      'player_2_age',
+                      'player_1_rank',
+                      'player_2_rank',
+                      'player_1_h2h',
+                      'player_2_h2h',
+                      'player_1_round_perc',
+                      'player_1_surface_perc',
+                      'player_1_tourney_level_perc',
+                      'player_1_tourney_round_perc',
+                      'player_2_round_perc',
+                      'player_2_surface_perc',
+                      'player_2_tourney_level_perc',
+                      'player_2_tourney_round_perc',
+                      'surface',
+                      'tourney_level',
+                      'result')
+merged_df <- merged_df %>% select(features_to_keep)
+```
+
+#### 3.7 - Removing Result Levels with Low Counts
+
+```{r}
+#To simplify future classification, remove noisy results from $results where few counts are detected
+
+less_than_5_wins <- data.frame(table(merged_df$result))
+less_than_5_wins <- less_than_5_wins %>% filter(Freq < 5)
+
+merged_df <- merged_df[!merged_df$result %in% less_than_5_wins$Var1,]
+
+```
+
+#### 3.8 - Final Organization of Data
+
+```{r}
+#Order the columns alphabetically
+merged_df <- merged_df[, order(names(merged_df))]
+```
+
+### SECTION 4 - DATA SPLITTING
+
+```{r}
+#Load the caret package
+library(caret)
+
+#Set the seed for reproducibility
+set.seed(123)
+
+#Set target variable as factor
+merged_df$result <- as.factor(merged_df$result)
+
+#Split the data into a training set (70%) and a testing set (30%)
+train_idx <- createDataPartition(merged_df$result, p = 0.7, list = FALSE)
+train <- merged_df[train_idx, ]
+test <- merged_df[-train_idx, ]
+
+#Split the data into x_train, x_test, y_train, y_test sets
+x_train <- train %>% select(-result)
+y_train <- train %>% select(result)
+y_train <- as.factor(y_train$result)
+
+x_test <- test %>% select(-result)
+y_test <- test %>% select(result)
+y_test <- as.factor(y_test$result)
+```
+
+### SECTION 5 - MODEL CREATION
+
+#### 5.1 - Random Forest Classifier, Default Settings
+
+```{r}
+library(caret)
+library(ranger)
+
+#Set seed for replicability
+set.seed(123)
+
+#Create model, measuring variable importance while building forest
+rf_ranger <- ranger(result ~., data = train, importance = "impurity")
+```
+
+```{r}
+#Print the model results
+print(rf_ranger)
+
+#Print the model's most important variables
+rf_ranger_vi <- data.frame(importance(rf_ranger))
+rf_ranger_vi <- rownames_to_column(rf_ranger_vi)
+
+#Plot the model's most important variables
+rf_ranger_vi %>% 
+  ggplot(aes(reorder(rowname, importance.rf_ranger.), importance.rf_ranger.)) + 
+  geom_col(aes(fill = importance.rf_ranger.)) + 
+  scale_fill_gradient(low = "red", high = "green") +
+  coord_flip() +
+  labs(x = "Feature", y = "Importance (Gini Impurity") +
+  ggtitle("Feature Importance for Random Forests Model")
+```
+
+```{r}
+#Determine default model accuracy on train data
+library(MLmetrics)
+
+y_pred <- rf_ranger$predictions
+round((Accuracy(y_pred, y_train)), 4)
+```
+
+#### 5.2 - Random Forest Classifier, Grid-Search Optimized Settings
+
+```{r}
+
+n_features = rf_ranger$num.independent.variables
+
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.15, .25, .35)),
+  min.node.size = c(1, 3, 5),
+  num.trees = n_features * c(5, 10, 15)
+)
+
+for(i in seq_len(nrow(hyper_grid))) {
+rf_ranger_opt <- ranger(
+    formula         = result ~ ., 
+    data            = train, 
+    num.trees       = n_features * 10,
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+  )
+
+#store results
+hyper_grid$rmse[i] <- sqrt(rf_ranger_opt$prediction.error)
+}
+
+```
+
+```{r}
+#Compare grid-search optimized settings to model defaults
+
+rf_ranger_rmse <- sqrt(rf_ranger_opt$prediction.error)
+hyper_grid$default_rmse <- rf_ranger_rmse
+hyper_grid <- hyper_grid %>% arrange(rmse) %>% mutate(percentage_gain = (rmse - rf_ranger_rmse) / rf_ranger$prediction.error * 100)
+
+print(hyper_grid)
+```
+
+```{r}
+#A lower RMSE score is better, meaning the model is able to fit the data better. With mtry = 5, min.node.size = 1, num.trees = 160, the RMSE from the default model decreases marginally by 2.11%.
+
+#Generate the model with the grid-search optimized parameters
+rf_ranger_opt_final <- ranger(result ~., 
+                              data = train, 
+                              importance = "impurity",
+                              mtry = 5,
+                              min.node.size = 1,
+                              num.trees = 160)
+```
+
+```{r}
+#Print the optimized model's results
+print(rf_ranger_opt_final)
+print(paste("RMSE:", sqrt(rf_ranger_opt_final$prediction.error)))
+
+#Determine optimized model accuracy on train data
+y_pred_opt <- rf_ranger_opt_final$predictions
+round((Accuracy(y_pred_opt, y_train)), 4)
+```
+
+#### 5.3 - Random Forest Classifier, Manually Optimized Settings
+
+```{r}
+#Using the grid-search model as a starting point, create a new model using higher mtry values.
+
+#Generate the model with the manually optimized parameters
+rf_ranger_opt_manual <- ranger(result ~., 
+                              data = train, 
+                              importance = "impurity",
+                              mtry = 10,
+                              min.node.size = 1,
+                              num.trees = 160)
+```
+
+```{r}
+#Print the optimized model's results
+print(rf_ranger_opt_manual)
+print(paste("RMSE:", sqrt(rf_ranger_opt_manual$prediction.error)))
+
+#Determine optimized model accuracy on train data
+y_pred_manual <- rf_ranger_opt_manual$predictions
+round((Accuracy(y_pred_manual, y_train)), 4)
+```
+
+#### 5.4 - Random Forest Classifier, Manually Optimized Settings, Truncated Features
+
+```{r}
+#Analyze the manually optimized model's feature importance and truncate the features that are least important
+
+#Print the model's most important variables
+rf_ranger_vi_opt_manual <- data.frame(importance(rf_ranger_opt_manual))
+rf_ranger_vi_opt_manual <- rownames_to_column(rf_ranger_vi_opt_manual)
+
+#Plot the model's most important variables
+rf_ranger_vi_opt_manual %>% 
+  ggplot(aes(reorder(rowname, importance.rf_ranger_opt_manual.), importance.rf_ranger_opt_manual.)) + 
+  geom_col(aes(fill = importance.rf_ranger_opt_manual.)) + 
+  scale_fill_gradient(low = "red", high = "green") +
+  coord_flip() +
+  labs(x = "Feature", y = "Importance (Gini Impurity") +
+  ggtitle("Feature Importance for Manually-Optimized Random Forests Model")
+
+#Truncate the least important feature from the training and test data sets
+trunc_train <- subset(train, select = -tourney_level)
+trunc_test <- subset(test, select = -tourney_level)
+
+```
+```{r}
+#Generate the model with the manually optimized parameters for the truncated data sets
+rf_ranger_opt_manual_red <- ranger(result ~., 
+                              data = trunc_train, 
+                              importance = "impurity",
+                              mtry = 10,
+                              min.node.size = 1,
+                              num.trees = 160)
+```
+
+```{r}
+#Determine optimized model accuracy on truncated train data
+y_pred_manual_red <- rf_ranger_opt_manual_red$predictions
+round((Accuracy(y_pred_manual_red, y_train)), 4)
+```
+
+#### 5.5 - Naive Bayes Classifier
+
+```{r}
+library(naivebayes)
+
+#Create naive Bayes model
+nb <- naive_bayes(result ~., data = train, usekernel = T, laplace = 1)
+```
+
+```{r}
+#Create naive Bayes model predictions on training data
+y_pred_nb <- predict(nb, newdata = train)
+
+#Assess accuracy of naive Bayes model on training data
+Accuracy(y_pred_nb, y_train)
+```
+
+#### 5.6 - Model Evaluation and Comparison
+
+```{r}
+#Create data frame to store model comparisons
+columns <- c("Model", "OOB Error", "RMSE", "Accuracy_Train", "Accuracy_Test")
+model_comparison <- data.frame(matrix(nrow = 0, ncol = length(columns)))
+colnames(model_comparison) = columns
+```
+
+```{r}
+#Evaluate default random forest model
+
+#On train data
+y_pred_train <- rf_ranger$predictions
+train_acc <- round((Accuracy(y_pred_train, y_train)), 4)
+
+#On test data
+pred_ranger <- predict(rf_ranger, test)
+y_pred_test <- pred_ranger$predictions
+test_acc <- round((Accuracy(y_pred_test, y_test)), 4)
+
+#Model data
+oob_error <- round((rf_ranger$prediction.error), 4)
+rmse <- round((sqrt(oob_error)), 4)
+
+model_comparison[1,] <- c("Random Forest - Default",
+                          oob_error,
+                          rmse,
+                          train_acc,
+                          test_acc)
+```
+
+```{r}
+#Evaluate grid-search optimized random forest model
+
+#On train data
+y_pred_train <- rf_ranger_opt_final$predictions
+train_acc <- round((Accuracy(y_pred_train, y_train)), 4)
+
+#On test data
+pred_ranger <- predict(rf_ranger_opt_final, test)
+y_pred_test <- pred_ranger$predictions
+test_acc <- round((Accuracy(y_pred_test, y_test)), 4)
+
+#Model data
+oob_error <- round((rf_ranger_opt_final$prediction.error), 4)
+rmse <- round((sqrt(oob_error)), 4)
+
+model_comparison[2,] <- c("Random Forest - Grid Search Optimized",
+                          oob_error,
+                          rmse,
+                          train_acc,
+                          test_acc)
+```
+
+```{r}
+#Evaluate manually optimized random forest model
+
+#On train data
+y_pred_train <- rf_ranger_opt_manual$predictions
+train_acc <- round((Accuracy(y_pred_train, y_train)), 4)
+
+#On test data
+pred_ranger <- predict(rf_ranger_opt_manual, test)
+y_pred_test <- pred_ranger$predictions
+test_acc <- round((Accuracy(y_pred_test, y_test)), 4)
+
+#Model data
+oob_error <- round((rf_ranger_opt_manual$prediction.error), 4)
+rmse <- round((sqrt(oob_error)), 4)
+
+model_comparison[3,] <- c("Random Forest - Manually Optimized",
+                          oob_error,
+                          rmse,
+                          train_acc,
+                          test_acc)
+```
+
+```{r}
+#Evaluate truncated features random forest model
+
+#On train data
+y_pred_train <- rf_ranger_opt_manual_red$predictions
+train_acc <- round((Accuracy(y_pred_train, y_train)), 4)
+
+#On test data
+pred_ranger <- predict(rf_ranger_opt_manual_red, test)
+y_pred_test <- pred_ranger$predictions
+test_acc <- round((Accuracy(y_pred_test, y_test)), 4)
+
+#Model data
+oob_error <- round((rf_ranger_opt_manual_red$prediction.error), 4)
+rmse <- round((sqrt(oob_error)), 4)
+
+model_comparison[4,] <- c("Random Forest - Truncated Features",
+                          oob_error,
+                          rmse,
+                          train_acc,
+                          test_acc)
+```
+
+```{r}
+#Evaluate naive bayes model
+
+#On train data
+y_pred_train <- predict(nb, newdata = train)
+train_acc <- round((Accuracy(y_pred_train, y_train)), 4)
+
+#On test data
+y_pred_test <- predict(nb, newdata = test)
+test_acc <- round((Accuracy(y_pred_test, y_test)), 4)
+
+#Model data
+oob_error <- "NA"
+rmse <- "NA"
+
+model_comparison[5,] <- c("Naive Bayes Classifier",
+                          oob_error,
+                          rmse,
+                          train_acc,
+                          test_acc)
+```
+
+```{r}
+#Visualize Model Performance
+
+model_comparison$Accuracy_Test <- as.numeric(model_comparison$Accuracy_Test)
+
+model_comparison
+
+ggplot(data = model_comparison, aes(x = Model, y = Accuracy_Test)) + 
+  geom_col(aes(fill = Model)) +
+  scale_y_continuous(limits = c(0, .8)) +
+  ggtitle("Model Comparison by Test Accuracy Scores") +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+```
+
